@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Video Speed Controls
 // @namespace    http://github.com/mikewillems/greasemonkey_video_speed
-// @version      0.4
+// @version      0.5
 // @description  Speed controller overlay with fade in/out on focus/changes or mouseover, which only runs on chosen sites.
 // @match        *://www.youtube.com/*
 // @match        *://youtube.com/*
@@ -50,15 +50,15 @@
     console.log('[VideoSpeedCtrl] Script loaded on', window.location.href);
 
     // ----- Config -----
-    const BIG_INCREMENTS = [0.125, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    const SMALL_INC_RANGE = [0.1, 6.0];
+    const BIG_INCREMENTS = [0.125, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    const SMALL_INC_RANGE = [0.1, 8.0];
     const SHOW_DURATION_MS = 1000;
     const FADE_DURATION_MS = 1000;
 
-    // Oscillation timing (ms)
+    // Breathe / oscillation timing (ms)
     const OSC_UP_MS = 5000;
-    const OSC_HOLD_MAX_MS = 1000;
-    const OSC_DOWN_MS = 5000;
+    const OSC_HOLD_MAX_MS = 0;
+    const OSC_DOWN_MS = 4000;
     const OSC_HOLD_MIN_MS = 1000;
     const OSC_TOTAL_MS = OSC_UP_MS + OSC_HOLD_MAX_MS + OSC_DOWN_MS + OSC_HOLD_MIN_MS;
 
@@ -67,16 +67,22 @@
     let controllerBox = null;
     let setButton = null;
 
+    // overlay timers
     let hideTimeout = null;
     let finalHideTimeout = null;
     let overlayHover = false;
 
+    // tracked videos
     const videoElements = new Set();
 
-    // --- oscillation state ---
-    let oscillationActive = false;
+    // ----- Breathe / oscillation state -----
+    let oscillationActive = false;      // user has breathe mode ON
+    let oscillationPaused = false;      // temporarily paused due to user changing speed
     let oscillationTimer = null;
+    let oscillationPauseTimeout = null;
     let oscillationStartTime = 0;
+
+    let breatheAnchor = 1.0;            // user-configured speed for breathe mode
     let oscillationMin = 1.0;
     let oscillationMax = 2.0;
 
@@ -94,12 +100,6 @@
         newRate = roundToTwoDecimals(newRate);
         video.playbackRate = newRate;
         updateSetButtonLabel();
-    }
-
-    // Manual changes should stop oscillation
-    function setPlaybackRateManual(video, rate) {
-        stopOscillation();
-        setPlaybackRate(video, rate);
     }
 
     function showOverlay() {
@@ -134,95 +134,86 @@
         }, SHOW_DURATION_MS);
     }
 
-    // ----- Step Logic -----
-    function bigStepDown(video) {
-        const current = video.playbackRate || 1.0;
-        let target = current;
-        for (let i = BIG_INCREMENTS.length - 1; i >= 0; i--) {
-            if (BIG_INCREMENTS[i] < current) {
-                target = BIG_INCREMENTS[i];
-                break;
-            }
-        }
-        setPlaybackRateManual(video, target);
+    // ----- Oscillation helpers -----
+    function recomputeOscillationRangeFromAnchor() {
+        oscillationMin = clamp(Math.min(breatheAnchor, 2.0), SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
+        oscillationMax = clamp(Math.max(breatheAnchor, 2.0), SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
     }
 
-    function bigStepUp(video) {
-        const current = video.playbackRate || 1.0;
-        let target = current;
-        for (let i = 0; i < BIG_INCREMENTS.length; i++) {
-            if (BIG_INCREMENTS[i] > current) {
-                target = BIG_INCREMENTS[i];
-                break;
-            }
-        }
-        setPlaybackRateManual(video, target);
-    }
-
-    function smallStepDown(video) {
-        const current = video.playbackRate || 1.0;
-        const min = SMALL_INC_RANGE[0];
-        let target = Math.floor(current * 10 - 0.0001) / 10; // highest 0.1 multiple < current
-        if (target < min) target = min;
-        setPlaybackRateManual(video, target);
-    }
-
-    function smallStepUp(video) {
-        const current = video.playbackRate || 1.0;
-        const max = SMALL_INC_RANGE[1];
-        let target = Math.ceil(current * 10 + 0.0001) / 10; // lowest 0.1 multiple > current
-        if (target > max) target = max;
-        setPlaybackRateManual(video, target);
-    }
-
-    function setToDefault(video) {
-        setPlaybackRateManual(video, 1.0);
-    }
-
-    // ----- Oscillation -----
-    function startOscillation() {
-        if (!currentVideo) return;
-
-        const cur = currentVideo.playbackRate || 1.0;
-        let min = Math.min(cur, 2.0);
-        let max = Math.max(cur, 2.0);
-
-        min = clamp(min, SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
-        max = clamp(max, SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
-
-        if (min === max) {
-            // nothing to oscillate between
-            return;
-        }
-
-        oscillationMin = min;
-        oscillationMax = max;
+    function ensureOscillationTimer() {
+        if (!oscillationActive || oscillationPaused) return;
+        if (oscillationTimer) return;
         oscillationStartTime = performance.now();
-        oscillationActive = true;
-
-        if (oscillationTimer) clearInterval(oscillationTimer);
         oscillationTimer = setInterval(updateOscillation, 100);
-        updateOscillation();
-        showOverlay();
     }
 
-    function stopOscillation() {
-        if (!oscillationActive) return;
-        oscillationActive = false;
+    function clearOscillationTimer() {
         if (oscillationTimer) {
             clearInterval(oscillationTimer);
             oscillationTimer = null;
         }
     }
 
+    function cancelOscillation() {
+        if (!oscillationActive) return;
+        oscillationActive = false;
+        oscillationPaused = false;
+        clearOscillationTimer();
+        if (oscillationPauseTimeout) {
+            clearTimeout(oscillationPauseTimeout);
+            oscillationPauseTimeout = null;
+        }
+    }
+
+    function pauseOscillationForUserAdjust() {
+        if (!oscillationActive) return;
+
+        oscillationPaused = true;
+        clearOscillationTimer();
+
+        if (oscillationPauseTimeout) {
+            clearTimeout(oscillationPauseTimeout);
+        }
+
+        oscillationPauseTimeout = setTimeout(() => {
+            oscillationPauseTimeout = null;
+            if (!oscillationActive) return;  // user canceled in the meantime
+            oscillationPaused = false;
+            ensureOscillationTimer();        // restart from a fresh cycle
+        }, 1000); // 1 second pause after last user change
+    }
+
+    function startOscillation() {
+        if (!currentVideo) return;
+
+        const cur = currentVideo.playbackRate || 1.0;
+        breatheAnchor = clamp(cur, SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
+        recomputeOscillationRangeFromAnchor();
+
+        if (oscillationMin === oscillationMax) {
+            // nothing to oscillate between
+            return;
+        }
+
+        oscillationActive = true;
+        oscillationPaused = false;
+        if (oscillationPauseTimeout) {
+            clearTimeout(oscillationPauseTimeout);
+            oscillationPauseTimeout = null;
+        }
+        ensureOscillationTimer();
+        showOverlay();
+    }
+
     function updateOscillation() {
-        if (!oscillationActive || !currentVideo) {
-            stopOscillation();
+        if (!oscillationActive || oscillationPaused || !currentVideo) {
+            clearOscillationTimer();
             return;
         }
 
         const now = performance.now();
-        let t = (now - oscillationStartTime) % OSC_TOTAL_MS;
+        const elapsed = now - oscillationStartTime;
+        let t = elapsed % OSC_TOTAL_MS;
 
         let rate;
         if (t < OSC_UP_MS) {
@@ -243,7 +234,78 @@
         }
 
         setPlaybackRate(currentVideo, rate);
-        // don't spam showOverlay() here; rely on the initial show when 'v' is pressed
+        // We intentionally don't re-show overlay every tick.
+    }
+
+    // When the user changes speed while breathe mode is active:
+    // - Adjust anchor via the step logic
+    // - Snap playback to anchor
+    // - Pause oscillation for 1s, then resume.
+    function applyUserRateChange(targetRate) {
+        if (!currentVideo) return;
+
+        if (oscillationActive) {
+            breatheAnchor = clamp(targetRate, SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
+            recomputeOscillationRangeFromAnchor();
+            setPlaybackRate(currentVideo, breatheAnchor);
+            pauseOscillationForUserAdjust();
+        } else {
+            setPlaybackRate(currentVideo, targetRate);
+        }
+    }
+
+    // ----- Step Logic (using anchor when oscillating) -----
+    function getBaseSpeedForAdjust(video) {
+        if (oscillationActive) {
+            return breatheAnchor;
+        }
+        return (video.playbackRate || 1.0);
+    }
+
+    function bigStepDown(video) {
+        const base = getBaseSpeedForAdjust(video);
+        let target = base;
+        for (let i = BIG_INCREMENTS.length - 1; i >= 0; i--) {
+            if (BIG_INCREMENTS[i] < base) {
+                target = BIG_INCREMENTS[i];
+                break;
+            }
+        }
+        applyUserRateChange(target);
+    }
+
+    function bigStepUp(video) {
+        const base = getBaseSpeedForAdjust(video);
+        let target = base;
+        for (let i = 0; i < BIG_INCREMENTS.length; i++) {
+            if (BIG_INCREMENTS[i] > base) {
+                target = BIG_INCREMENTS[i];
+                break;
+            }
+        }
+        applyUserRateChange(target);
+    }
+
+    function smallStepDown(video) {
+        const base = getBaseSpeedForAdjust(video);
+        const min = SMALL_INC_RANGE[0];
+        let target = Math.floor(base * 10 - 0.0001) / 10; // highest 0.1 multiple < base
+        if (target < min) target = min;
+        applyUserRateChange(target);
+    }
+
+    function smallStepUp(video) {
+        const base = getBaseSpeedForAdjust(video);
+        const max = SMALL_INC_RANGE[1];
+        let target = Math.ceil(base * 10 + 0.0001) / 10; // lowest 0.1 multiple > base
+        if (target > max) target = max;
+        applyUserRateChange(target);
+    }
+
+    function setToDefault(video) {
+        // 'o' / set button: cancel breathe mode and reset to 1.0
+        cancelOscillation();
+        setPlaybackRate(video, 1.0);
     }
 
     // ----- Controller UI -----
@@ -327,6 +389,7 @@
             showOverlay();
         });
 
+        // center button: reset to 1.0 *and cancel breathe mode*
         buttons['set'].addEventListener('click', () => {
             if (!currentVideo) return;
             setToDefault(currentVideo);
@@ -415,30 +478,29 @@
 
         let handled = false;
         switch (e.key) {
-            case 'S':
+            case 'S': // big down
                 bigStepDown(currentVideo);
                 handled = true;
                 break;
-            case 's':
+            case 's': // small down
                 smallStepDown(currentVideo);
                 handled = true;
                 break;
-            case 'o':
+            case 'o': // reset to 1.0 and cancel breathe mode
                 setToDefault(currentVideo);
                 handled = true;
                 break;
-            case 'd':
+            case 'd': // small up
                 smallStepUp(currentVideo);
                 handled = true;
                 break;
-            case 'D':
+            case 'D': // big up
                 bigStepUp(currentVideo);
                 handled = true;
                 break;
-            case 'v':
-                // toggle oscillation
+            case 'v': // toggle breathe mode
                 if (oscillationActive) {
-                    stopOscillation();
+                    cancelOscillation();
                 } else {
                     startOscillation();
                 }
