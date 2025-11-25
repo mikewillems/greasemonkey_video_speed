@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Video Speed Controls
 // @namespace    http://github.com/mikewillems/greasemonkey_video_speed
-// @version      0.5
-// @description  Speed controller overlay with fade in/out on focus/changes or mouseover, which only runs on chosen sites.
+// @version      0.6
+// @description  Speed controller overlay with fade in/out on focus/changes or mouseover, for chosen sites (video + audio).
 // @match        *://www.youtube.com/*
 // @match        *://youtube.com/*
 // @match        *://www.vimeo.com/*
@@ -41,9 +41,11 @@
 // @match        *://odyssey.com/*
 // @match        *://odysee.com/*
 // @match        *://www.odysee.com/*
+// @match        https://www.npr.org/*
 // @run-at       document-end
 // @grant        GM_addStyle
 // ==/UserScript==
+
 (function() {
     'use strict';
 
@@ -63,7 +65,8 @@
     const OSC_TOTAL_MS = OSC_UP_MS + OSC_HOLD_MAX_MS + OSC_DOWN_MS + OSC_HOLD_MIN_MS;
 
     // ----- State -----
-    let currentVideo = null;
+    /** @type {HTMLMediaElement|null} */
+    let currentMedia = null;   // <video> or <audio>
     let controllerBox = null;
     let setButton = null;
 
@@ -72,8 +75,9 @@
     let finalHideTimeout = null;
     let overlayHover = false;
 
-    // tracked videos
-    const videoElements = new Set();
+    // tracked media elements
+    /** @type {Set<HTMLMediaElement>} */
+    const mediaElements = new Set();
 
     // ----- Breathe / oscillation state -----
     let oscillationActive = false;      // user has breathe mode ON
@@ -95,10 +99,10 @@
         return Math.round(value * 100) / 100;
     }
 
-    function setPlaybackRate(video, rate) {
+    function setPlaybackRate(media, rate) {
         let newRate = clamp(rate, SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
         newRate = roundToTwoDecimals(newRate);
-        video.playbackRate = newRate;
+        media.playbackRate = newRate;
         updateSetButtonLabel();
     }
 
@@ -184,9 +188,9 @@
     }
 
     function startOscillation() {
-        if (!currentVideo) return;
+        if (!currentMedia) return;
 
-        const cur = currentVideo.playbackRate || 1.0;
+        const cur = currentMedia.playbackRate || 1.0;
         breatheAnchor = clamp(cur, SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
         recomputeOscillationRangeFromAnchor();
 
@@ -206,7 +210,7 @@
     }
 
     function updateOscillation() {
-        if (!oscillationActive || oscillationPaused || !currentVideo) {
+        if (!oscillationActive || oscillationPaused || !currentMedia) {
             clearOscillationTimer();
             return;
         }
@@ -233,7 +237,7 @@
             rate = oscillationMin;
         }
 
-        setPlaybackRate(currentVideo, rate);
+        setPlaybackRate(currentMedia, rate);
         // We intentionally don't re-show overlay every tick.
     }
 
@@ -242,28 +246,28 @@
     // - Snap playback to anchor
     // - Pause oscillation for 1s, then resume.
     function applyUserRateChange(targetRate) {
-        if (!currentVideo) return;
+        if (!currentMedia) return;
 
         if (oscillationActive) {
             breatheAnchor = clamp(targetRate, SMALL_INC_RANGE[0], SMALL_INC_RANGE[1]);
             recomputeOscillationRangeFromAnchor();
-            setPlaybackRate(currentVideo, breatheAnchor);
+            setPlaybackRate(currentMedia, breatheAnchor);
             pauseOscillationForUserAdjust();
         } else {
-            setPlaybackRate(currentVideo, targetRate);
+            setPlaybackRate(currentMedia, targetRate);
         }
     }
 
     // ----- Step Logic (using anchor when oscillating) -----
-    function getBaseSpeedForAdjust(video) {
+    function getBaseSpeedForAdjust(media) {
         if (oscillationActive) {
             return breatheAnchor;
         }
-        return (video.playbackRate || 1.0);
+        return (media.playbackRate || 1.0);
     }
 
-    function bigStepDown(video) {
-        const base = getBaseSpeedForAdjust(video);
+    function bigStepDown(media) {
+        const base = getBaseSpeedForAdjust(media);
         let target = base;
         for (let i = BIG_INCREMENTS.length - 1; i >= 0; i--) {
             if (BIG_INCREMENTS[i] < base) {
@@ -274,8 +278,8 @@
         applyUserRateChange(target);
     }
 
-    function bigStepUp(video) {
-        const base = getBaseSpeedForAdjust(video);
+    function bigStepUp(media) {
+        const base = getBaseSpeedForAdjust(media);
         let target = base;
         for (let i = 0; i < BIG_INCREMENTS.length; i++) {
             if (BIG_INCREMENTS[i] > base) {
@@ -286,26 +290,26 @@
         applyUserRateChange(target);
     }
 
-    function smallStepDown(video) {
-        const base = getBaseSpeedForAdjust(video);
+    function smallStepDown(media) {
+        const base = getBaseSpeedForAdjust(media);
         const min = SMALL_INC_RANGE[0];
         let target = Math.floor(base * 10 - 0.0001) / 10; // highest 0.1 multiple < base
         if (target < min) target = min;
         applyUserRateChange(target);
     }
 
-    function smallStepUp(video) {
-        const base = getBaseSpeedForAdjust(video);
+    function smallStepUp(media) {
+        const base = getBaseSpeedForAdjust(media);
         const max = SMALL_INC_RANGE[1];
         let target = Math.ceil(base * 10 + 0.0001) / 10; // lowest 0.1 multiple > base
         if (target > max) target = max;
         applyUserRateChange(target);
     }
 
-    function setToDefault(video) {
+    function setToDefault(media) {
         // 'o' / set button: cancel breathe mode and reset to 1.0
         cancelOscillation();
-        setPlaybackRate(video, 1.0);
+        setPlaybackRate(media, 1.0);
     }
 
     // ----- Controller UI -----
@@ -378,33 +382,33 @@
         controllerBox.insertBefore(label, controllerBox.firstChild);
 
         buttons['<<'].addEventListener('click', () => {
-            if (!currentVideo) return;
-            bigStepDown(currentVideo);
+            if (!currentMedia) return;
+            bigStepDown(currentMedia);
             showOverlay();
         });
 
         buttons['<'].addEventListener('click', () => {
-            if (!currentVideo) return;
-            smallStepDown(currentVideo);
+            if (!currentMedia) return;
+            smallStepDown(currentMedia);
             showOverlay();
         });
 
         // center button: reset to 1.0 *and cancel breathe mode*
         buttons['set'].addEventListener('click', () => {
-            if (!currentVideo) return;
-            setToDefault(currentVideo);
+            if (!currentMedia) return;
+            setToDefault(currentMedia);
             showOverlay();
         });
 
         buttons['>'].addEventListener('click', () => {
-            if (!currentVideo) return;
-            smallStepUp(currentVideo);
+            if (!currentMedia) return;
+            smallStepUp(currentMedia);
             showOverlay();
         });
 
         buttons['>>'].addEventListener('click', () => {
-            if (!currentVideo) return;
-            bigStepUp(currentVideo);
+            if (!currentMedia) return;
+            bigStepUp(currentMedia);
             showOverlay();
         });
 
@@ -418,51 +422,51 @@
     function updateSetButtonLabel() {
         if (!setButton) return;
         let speed = 1.0;
-        if (currentVideo) {
-            speed = currentVideo.playbackRate || 1.0;
+        if (currentMedia) {
+            speed = currentMedia.playbackRate || 1.0;
         }
         const rounded = roundToTwoDecimals(speed).toFixed(2);
         setButton.textContent = `${rounded}x`;
     }
 
-    // ----- Video tracking -----
-    function markVideoActive(video) {
-        currentVideo = video;
-        if (!video.hasAttribute('tabindex')) {
-            video.setAttribute('tabindex', '0');
+    // ----- Media tracking (video + audio) -----
+    function markMediaActive(media) {
+        currentMedia = media;
+        if (!media.hasAttribute('tabindex')) {
+            media.setAttribute('tabindex', '0');
         }
         updateSetButtonLabel();
         showOverlay();
     }
 
-    function attachToVideo(video) {
-        if (video.__gmSpeedAttached) return;
-        video.__gmSpeedAttached = true;
+    function attachToMedia(media) {
+        if (media.__gmSpeedAttached) return;
+        media.__gmSpeedAttached = true;
 
-        videoElements.add(video);
+        mediaElements.add(media);
 
-        video.addEventListener('click', () => markVideoActive(video));
-        video.addEventListener('focus', () => markVideoActive(video));
-        video.addEventListener('playing', () => markVideoActive(video));
-        video.addEventListener('ratechange', () => {
-            if (currentVideo === video) {
+        media.addEventListener('click', () => markMediaActive(media));
+        media.addEventListener('focus', () => markMediaActive(media));
+        media.addEventListener('playing', () => markMediaActive(media));
+        media.addEventListener('ratechange', () => {
+            if (currentMedia === media) {
                 updateSetButtonLabel();
             }
         });
 
-        if (!currentVideo) {
-            markVideoActive(video);
+        if (!currentMedia) {
+            markMediaActive(media);
         }
     }
 
-    function scanForVideos() {
-        const videos = document.querySelectorAll('video');
-        videos.forEach(v => attachToVideo(v));
+    function scanForMedia() {
+        const nodes = document.querySelectorAll('video, audio');
+        nodes.forEach(m => attachToMedia(m));
     }
 
     // ----- Keyboard shortcuts -----
     window.addEventListener('keydown', function(e) {
-        if (!currentVideo) return;
+        if (!currentMedia) return;
 
         const target = e.target;
         const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
@@ -472,30 +476,30 @@
 
         const active = document.activeElement;
         const overlayHasFocus = controllerBox && controllerBox.contains(active);
-        const videoHasFocus = (active === currentVideo);
-        // If you want strictly "video in focus", uncomment:
-        // if (!videoHasFocus && !overlayHasFocus) return;
+        const mediaHasFocus = (active === currentMedia);
+        // If you want strictly "media in focus", uncomment:
+        // if (!mediaHasFocus && !overlayHasFocus) return;
 
         let handled = false;
         switch (e.key) {
             case 'S': // big down
-                bigStepDown(currentVideo);
+                bigStepDown(currentMedia);
                 handled = true;
                 break;
             case 's': // small down
-                smallStepDown(currentVideo);
+                smallStepDown(currentMedia);
                 handled = true;
                 break;
             case 'o': // reset to 1.0 and cancel breathe mode
-                setToDefault(currentVideo);
+                setToDefault(currentMedia);
                 handled = true;
                 break;
             case 'd': // small up
-                smallStepUp(currentVideo);
+                smallStepUp(currentMedia);
                 handled = true;
                 break;
             case 'D': // big up
-                bigStepUp(currentVideo);
+                bigStepUp(currentMedia);
                 handled = true;
                 break;
             case 'v': // toggle breathe mode
@@ -515,7 +519,7 @@
         }
     }, true);
 
-    // ----- Global mousemove: overlay + video geometry -----
+    // ----- Global mousemove: overlay + media geometry -----
     window.addEventListener('mousemove', function(e) {
         const x = e.clientX;
         const y = e.clientY;
@@ -556,34 +560,33 @@
             }
         }
 
-        // 2) video hover
-        if (videoElements.size === 0) return;
+        // 2) media hover (video or audio)
+        if (mediaElements.size === 0) return;
 
-        let hoveredVideo = null;
-        for (const v of videoElements) {
-            const rect = v.getBoundingClientRect();
+        let hoveredMedia = null;
+        for (const m of mediaElements) {
+            const rect = m.getBoundingClientRect();
             if (
                 x >= rect.left &&
                 x <= rect.right &&
                 y >= rect.top &&
                 y <= rect.bottom
             ) {
-                hoveredVideo = v;
+                hoveredMedia = m;
                 break;
             }
         }
 
-        if (!hoveredVideo) return;
-
-        markVideoActive(hoveredVideo);
+        if (!hoveredMedia) return;
+        markMediaActive(hoveredMedia);
     }, true);
 
     // ----- Startup -----
     createController();
-    scanForVideos();
+    scanForMedia();
     showOverlay();
 
-    const observer = new MutationObserver(() => scanForVideos());
+    const observer = new MutationObserver(() => scanForMedia());
     observer.observe(document.documentElement || document.body, {
         childList: true,
         subtree: true
