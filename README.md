@@ -1,7 +1,7 @@
 # greasemonkey_video_speed
 This is a Greasemonkey script that gives a small speed controller only on the sites you specifically choose.
 
-Youtube started trying to charge for this as a way to upsell their subscription (lolwut, they can go eat dirt). This works for any primarily HTML5 based site.
+Youtube started trying to charge for this as a way to upsell their subscription (lolwut, they can go eat dirt). This works for any primarily HTML5 based site, and also works for HTML5 audio (e.g. podcasts), though streaming music is normally not implemented as HTML5.
 
 ## Controls
 
